@@ -299,6 +299,16 @@ grep '"event":"enter"' ~/.lark-channel/profiles/<profile>/logs/bridge-$(date +%Y
 
 每行都带 `chatId`（群 / 私聊 ID）和 `senderId`（用户 `open_id`）。手改完后**重启 bridge**，或在允许的 admin 上下文里发 `/reconnect` 让它生效。日常调整还是 `/invite` / `/config` 更省事，直接改文件主要用于部署脚本预填。
 
+## 自动话题回复
+
+在 `~/.lark-channel/config.json` 对应 profile 的 `preferences` 中设置
+`"autoTopicReplies": true`，然后重启该 profile。默认关闭。
+
+- 私聊中的每条新消息、普通群里符合现有响应条件的每条新消息都会开启独立话题。打开该话题追问会续用同一个 Agent 会话。话题内的 `/stop` 和停止按钮只影响当前话题。
+- 群里的访问名单和 @ 要求继续生效。顶层命令仍作用于当前聊天，例如在主聊天用 `/cd` 选择新话题默认使用的目录。
+- 自动话题按首条飞书消息隔离会话与队列，使用现有卡片、Markdown 或文本回复。单独的 COT 过程消息在自动话题中使用同话题内的常规进度展示。
+- 若目标会话无法创建话题，请在飞书话题群中使用机器人。
+
 ## 云文档评论
 
 云文档评论不再需要单独绑定工作目录或维护文档白名单。支持的文档评论里 @bot 后，bridge 会在同一个评论线程里回复。评论运行复用文档级 session key；没有记录过文档 cwd 时回退到用户 home 目录。

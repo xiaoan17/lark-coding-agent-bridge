@@ -1,5 +1,5 @@
 import type { CardActionEvent } from '@larksuite/channel';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ActiveRuns } from '../../../src/bot/active-runs.js';
 import type { ChatModeCache } from '../../../src/bot/chat-mode-cache.js';
 import { PendingQueue } from '../../../src/bot/pending-queue.js';
@@ -100,6 +100,36 @@ describe('signed card callback dispatch', () => {
     expect(queued[0]?.content).toBe('[card-click] {"choice":"a"}');
   });
 
+  it('stops only the auto-topic run referenced by the card carrier', async () => {
+    const h = await createHarness({ autoTopicReplies: true });
+    const carrier = { thread_id: 'omt_a', root_id: 'om_a' };
+    vi.spyOn(h.channel, 'fetchRawMessage').mockResolvedValue([carrier]);
+    const runA = h.agent.run({ runId: 'run-active', prompt: 'task A' }) as FakeAgentRun;
+    const runB = h.agent.run({ runId: 'run-b', prompt: 'task B' }) as FakeAgentRun;
+    h.activeRuns.register('oc_group:om_a', runA);
+    h.activeRuns.register('oc_group:om_b', runB);
+
+    await h.dispatch({
+      cmd: 'stop',
+      __bridge_cb: true,
+      bridge_token: h.token('stop', { scope: 'oc_group:om_a' }),
+    });
+
+    expect(runA.stopped).toBe(true);
+    expect(runB.stopped).toBe(false);
+  });
+
+  it('does not stop the chat-level run when an auto-topic carrier cannot be found', async () => {
+    const h = await createHarness({ autoTopicReplies: true });
+    vi.spyOn(h.channel, 'fetchRawMessage').mockResolvedValue([]);
+    const run = h.agent.run({ runId: 'run-active', prompt: 'chat-level task' }) as FakeAgentRun;
+    h.activeRuns.register('oc_group', run);
+
+    await h.dispatch({ cmd: 'stop' });
+
+    expect(run.stopped).toBe(false);
+  });
+
   it('rejects bridge callbacks when callback auth is unavailable', async () => {
     const h = await createHarness({ callbackAuth: false });
     const activeRun = h.agent.run({ runId: 'run-active', prompt: 'running' }) as FakeAgentRun;
@@ -133,7 +163,7 @@ type Harness = {
 };
 
 async function createHarness(
-  opts: { callbackAuth?: boolean; chatMode?: 'p2p' | 'group' | 'topic' } = {},
+  opts: { callbackAuth?: boolean; chatMode?: 'p2p' | 'group' | 'topic'; autoTopicReplies?: boolean } = {},
 ): Promise<Harness> {
   const tmp = await createTmpProfile('callback-dispatch-test-');
   const channel = createFakeChannel();
@@ -163,6 +193,7 @@ async function createHarness(
     }),
     processId: 'proc-1',
   } satisfies Controls;
+  controls.profileConfig.preferences.autoTopicReplies = opts.autoTopicReplies;
   let nonce = 'nonce-stop';
   const auth = new CallbackAuth({
     keys: [{ version: 1, secret: 'secret-1' }],

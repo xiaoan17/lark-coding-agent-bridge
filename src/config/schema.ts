@@ -92,6 +92,8 @@ export interface AppAccess {
 export interface AppPreferences {
   /** Reply rendering mode for IM (group/p2p) messages. Default 'card'. */
   messageReply?: MessageReplyMode;
+  /** Start an independent Feishu topic for each new task in DMs and ordinary groups. */
+  autoTopicReplies?: boolean;
   /**
    * Internal marker: pre-0.1.27 the value `'text'` meant "lightweight
    * streaming markdown card" (what's now called `'markdown'`). On upgrade

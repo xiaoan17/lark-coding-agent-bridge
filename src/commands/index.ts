@@ -2,11 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute } from 'node:path';
-import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
+import type { LarkChannel } from '@larksuite/channel';
 import { claudeCapability, codexCapability } from '../agent/capability';
 import { DEFAULT_MODEL, normalizeModelSelection, supportedModels } from '../agent/models';
 import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
+import type { RoutedMessage } from '../bot/scope';
 import {
   accountCurrentCard,
   accountFailureCard,
@@ -116,10 +117,10 @@ export interface Controls {
 
 export interface CommandContext {
   channel: LarkChannel;
-  msg: NormalizedMessage;
+  msg: RoutedMessage;
   /**
    * Session scope string. For p2p / regular group it equals `msg.chatId`;
-   * for topic groups it's `${chatId}:${threadId}` (so each topic gets its
+   * for topics it includes the thread ID or root message ID (so each topic gets its
    * own session / cwd / active-run). All handlers should read/write
    * session / workspace / activeRuns through this — never through
    * `msg.chatId` directly.
@@ -297,10 +298,16 @@ async function reply(ctx: CommandContext, markdown: string): Promise<void> {
   }
 }
 
-function commandReplyOptions(ctx: CommandContext): { replyTo: string; replyInThread?: true } {
+function commandReplyOptions(ctx: CommandContext): { replyTo?: string; replyInThread?: true } {
+  // Keep chat-level command cards outside automatic topics. An inline card
+  // reply can carry a root ID too, which would otherwise misroute its clicks.
+  if (ctx.controls.profileConfig.preferences.autoTopicReplies === true && ctx.chatMode !== 'topic') {
+    return {};
+  }
   return {
-    replyTo: ctx.msg.messageId,
-    ...(ctx.chatMode === 'topic' && ctx.msg.threadId ? { replyInThread: true as const } : {}),
+    replyTo: ctx.msg.topicRootId ?? ctx.msg.messageId,
+    ...(ctx.msg.topicRootId || (ctx.chatMode === 'topic' && ctx.msg.threadId)
+      ? { replyInThread: true as const } : {}),
   };
 }
 
@@ -752,7 +759,8 @@ async function listCodexResumeHistory(
 }
 
 function effectiveWorkspaceCwd(ctx: CommandContext): string | undefined {
-  return ctx.workspaces.cwdFor(ctx.scope) ?? ctx.controls.profileConfig.workspaces.default;
+  return ctx.workspaces.cwdFor(ctx.scope, ctx.msg.topicRootId ? ctx.msg.chatId : undefined)
+    ?? ctx.controls.profileConfig.workspaces.default;
 }
 
 function selectedResumeCwd(ctx: CommandContext): string | undefined {

@@ -24,6 +24,7 @@ import type { WorkspaceStore } from '../workspace/store';
 export interface StartRunFlowInput {
   scopeId: string;
   scope: ScopeContext;
+  fallbackWorkspaceScope?: string;
   prompt: string;
   attachments: AgentAttachment[];
   access: AccessDecision;
@@ -76,7 +77,8 @@ export interface RecordRunSessionEventInput {
 
 export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFlowResult> {
   const requestedCwd =
-    input.workspaces.cwdFor(input.scopeId) ?? input.profileConfig.workspaces.default ?? '';
+    input.workspaces.cwdFor(input.scopeId, input.fallbackWorkspaceScope)
+      ?? input.profileConfig.workspaces.default ?? '';
   const workspace = await resolveWorkingDirectory(requestedCwd);
   if (!workspace.ok) {
     return {

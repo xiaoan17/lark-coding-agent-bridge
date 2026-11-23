@@ -1,37 +1,24 @@
-import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
-import type { ChatModeCache } from './chat-mode-cache';
+import type { NormalizedMessage } from '@larksuite/channel';
+import type { ChatMode } from './chat-mode-cache';
 
-/**
- * Compute the **session scope** for a message.
- *
- *  - **p2p / group**: scope = `chatId`. Replies in regular groups thread the
- *    UI but share the chat's session (matches user expectation).
- *  - **topic group**: scope = `${chatId}:${threadId}` — each topic is an
- *    independent conversation with its own session / cwd / pending queue.
- *    Topic-group top-level messages (no threadId, rare) fall back to chatId.
- *
- * Async because chat mode requires an API lookup (cached after first hit).
- * Callers typically await this once at intake/cardAction entry and pass
- * the resolved scope through.
- */
-export async function scopeFor(
-  channel: LarkChannel,
-  chatId: string,
-  threadId: string | undefined,
-  cache: ChatModeCache,
-): Promise<string> {
-  const mode = await cache.resolve(channel, chatId);
-  if (mode === 'topic' && threadId) {
-    return `${chatId}:${threadId}`;
-  }
-  return chatId;
+export interface RoutedMessage extends NormalizedMessage {
+  /** The Feishu root message ID is available before Feishu assigns a thread ID. */
+  topicRootId?: string;
 }
 
-/** Convenience overload from a NormalizedMessage. */
-export async function scopeForMessage(
-  channel: LarkChannel,
-  msg: NormalizedMessage,
-  cache: ChatModeCache,
-): Promise<string> {
-  return scopeFor(channel, msg.chatId, msg.threadId, cache);
+export function imRoute(
+  msg: Pick<NormalizedMessage, 'chatId' | 'messageId' | 'threadId' | 'rootId' | 'replyToMessageId'>,
+  mode: ChatMode,
+  autoTopicReplies: boolean,
+): { scope: string; mode: ChatMode; topicRootId?: string } {
+  if (autoTopicReplies && mode !== 'topic') {
+    const rootId = msg.rootId ?? msg.replyToMessageId ?? (msg.threadId ? undefined : msg.messageId);
+    if (rootId) {
+      return { scope: `${msg.chatId}:${rootId}`, mode: 'topic', topicRootId: rootId };
+    }
+  }
+  if (msg.threadId) {
+    return { scope: `${msg.chatId}:${msg.threadId}`, mode: 'topic' };
+  }
+  return { scope: msg.chatId, mode };
 }

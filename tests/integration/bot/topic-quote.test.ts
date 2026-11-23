@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
 import { SessionStore } from '../../../src/session/store.js';
+import { SessionCatalog } from '../../../src/session/catalog.js';
 import { WorkspaceStore } from '../../../src/workspace/store.js';
 import { FakeAgentAdapter } from '../../helpers/fake-agent.js';
 import type { AgentEvent } from '../../../src/agent/types.js';
@@ -56,7 +57,7 @@ interface FakeLarkChannel {
   on(handlers: MessageHandlerMap): void;
   connect(): Promise<void>;
   disconnect(): Promise<void>;
-  getChatMode(chatId: string): Promise<'group' | 'topic'>;
+  getChatMode(chatId: string): Promise<'p2p' | 'group' | 'topic'>;
   getConnectionStatus(): { state: 'connected'; reconnectAttempts: number };
   send(chatId: string, content: unknown, options?: unknown): Promise<{ messageId: string }>;
   stream(chatId: string, input: unknown, options?: unknown): Promise<{ messageId: string }>;
@@ -416,6 +417,94 @@ describe('topic message quote handling', () => {
   });
 });
 
+describe('automatic topics', () => {
+  it.each([
+    ['p2p', 'codex'],
+    ['group', 'claude'],
+  ] as const)('keeps separate %s tasks and resumes the original %s session', async (chatMode, agentKind) => {
+    const eventFor = (id: string): AgentEvent => agentKind === 'codex'
+      ? { type: 'system', threadId: id }
+      : { type: 'system', sessionId: id };
+    const h = await createHarness({
+      chatMode,
+      agentKind,
+      autoTopicReplies: true,
+      rawThreadIds: { om_followup: 'omt_a' },
+      rawRootIds: { om_followup: 'om_a' },
+    });
+    const send = (messageId: string, refs: { threadId?: string; rootId?: string } = {}) =>
+      h.channel.handlers.message?.({
+        ...message({ messageId, content: messageId, ...refs }),
+        chatType: chatMode,
+      });
+    const answer: AgentEvent = { type: 'text', delta: 'answer' };
+    const done: AgentEvent = { type: 'done', terminationReason: 'normal' };
+    h.agent.setEvents([
+      [eventFor('session-a'), answer, done],
+      [eventFor('session-b'), answer, done],
+      [answer, done],
+    ]);
+    const cwd = await realpath(h.tmp.profile);
+    h.workspaces.setCwd('oc_topic_chat', cwd);
+    await startTestBridge(h);
+
+    await Promise.all([send('om_a'), send('om_b')]);
+    await waitFor(() => h.channel.streams.length === 2);
+    expect(h.channel.streams.map((entry) => entry.options)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ replyTo: 'om_a', replyInThread: true }),
+      expect.objectContaining({ replyTo: 'om_b', replyInThread: true }),
+    ]));
+    expect(h.agent.runOptions).toHaveLength(2);
+    expect(h.agent.runOptions.every((run) => !run.sessionId && !run.threadId)).toBe(true);
+    expect(h.agent.runOptions.map((run) => run.cwd)).toEqual([cwd, cwd]);
+
+    await send('om_followup', chatMode === 'p2p' ? { rootId: 'om_a' } : { threadId: 'omt_a' });
+    await waitFor(() => h.channel.streams.length === 3);
+    const originalRun = h.agent.runOptions.findIndex((run) => run.prompt.includes('om_a'));
+    expect(originalRun).toBeGreaterThanOrEqual(0);
+    expect(h.agent.runOptions[2]).toMatchObject({
+      [agentKind === 'codex' ? 'threadId' : 'sessionId']: originalRun === 0 ? 'session-a' : 'session-b',
+    });
+    expect(h.channel.streams[2]?.options).toMatchObject({ replyTo: 'om_a', replyInThread: true });
+    if (chatMode === 'group') expect(h.channel.fetchRawMessage).toHaveBeenCalledWith('om_followup');
+  });
+
+  it('keeps a top-level command card at chat level', async () => {
+    const h = await createHarness({ chatMode: 'group', autoTopicReplies: true });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message({ messageId: 'om_status', content: '/status' }));
+
+    expect(h.agent.runOptions).toHaveLength(0);
+    expect(h.channel.sent[0]?.options).toEqual({});
+  });
+
+  it('retains the original topic when streaming falls back to a final message', async () => {
+    const h = await createHarness({
+      chatMode: 'group',
+      autoTopicReplies: true,
+      agentEvents: [
+        { type: 'text', delta: 'final answer' },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    });
+    vi.spyOn(h.channel, 'stream').mockRejectedValueOnce(new Error('stream unavailable'));
+    await startTestBridge(h);
+    await h.channel.handlers.message?.(message({ messageId: 'om_retry', content: 'task' }));
+    await waitFor(() => h.channel.sent.length === 1);
+    expect(h.channel.sent[0]?.options).toMatchObject({ replyTo: 'om_retry', replyInThread: true });
+  });
+
+  it('does not put an unresolved topic into the shared group session', async () => {
+    const h = await createHarness({ autoTopicReplies: true });
+    h.channel.fetchRawMessage.mockResolvedValueOnce([]);
+    await startTestBridge(h);
+    await h.channel.handlers.message?.(message({ messageId: 'om_unresolved', content: 'task' }));
+    expect(h.agent.runOptions).toHaveLength(0);
+    expect(h.channel.sent[0]?.options).toMatchObject({ replyTo: 'om_unresolved', replyInThread: true });
+  });
+});
+
 describe('merge_forward fetch failure', () => {
   it('skips the run and hints the user when the SDK could not fetch a merge_forward', async () => {
     // @larksuite/channel >= 0.4.1 normalizes an un-fetchable merge_forward to
@@ -465,9 +554,12 @@ describe('merge_forward fetch failure', () => {
 });
 
 async function createHarness(options: {
-  chatMode?: 'group' | 'topic';
+  chatMode?: 'p2p' | 'group' | 'topic';
+  agentKind?: 'claude' | 'codex';
+  autoTopicReplies?: boolean;
   quotedMessages?: Record<string, string>;
   rawThreadIds?: Record<string, string>;
+  rawRootIds?: Record<string, string>;
   threadMessages?: Array<Record<string, unknown>>;
   agentEvents?: AgentEvent[];
 } = {}):Promise<{
@@ -475,6 +567,7 @@ async function createHarness(options: {
   channel: FakeLarkChannel & { handlers: MessageHandlerMap };
   agent: FakeAgentAdapter;
   sessions: SessionStore;
+  sessionCatalog?: SessionCatalog;
   workspaces: WorkspaceStore;
   profileConfig: ReturnType<typeof createDefaultProfileConfig>;
   controls: ReturnType<typeof createControls>;
@@ -482,7 +575,8 @@ async function createHarness(options: {
   const tmp = await createTmpProfile('topic-quote-');
   const workspace = await realpath(tmp.workspace);
   const baseProfileConfig = createDefaultProfileConfig({
-    agentKind: 'claude',
+    agentKind: options.agentKind ?? 'claude',
+    ...(options.agentKind === 'codex' ? { codex: { binaryPath: 'codex' } } : {}),
     accounts: {
       app: {
         id: 'cli_test',
@@ -497,12 +591,15 @@ async function createHarness(options: {
   });
   const profileConfig = {
     ...baseProfileConfig,
+    preferences: { ...baseProfileConfig.preferences, autoTopicReplies: options.autoTopicReplies },
     workspaces: {
       ...baseProfileConfig.workspaces,
       default: workspace,
     },
   };
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
+  const sessionCatalog = options.agentKind === 'codex'
+    ? new SessionCatalog(join(tmp.profile, 'session-catalog.json')) : undefined;
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
   const agent = new FakeAgentAdapter({
     events: options.agentEvents ?? [{ type: 'done', terminationReason: 'normal' }],
@@ -511,7 +608,7 @@ async function createHarness(options: {
   sdkMock.channel = channel;
   const controls = createControls(profileConfig);
   cleanups.push(async () => {
-    await Promise.all([sessions.flush(), workspaces.flush()]);
+    await Promise.all([sessions.flush(), sessionCatalog?.flush(), workspaces.flush()]);
     await tmp.cleanup();
   });
   return {
@@ -519,6 +616,7 @@ async function createHarness(options: {
     channel,
     agent,
     sessions,
+    sessionCatalog,
     workspaces,
     profileConfig,
     controls,
@@ -529,6 +627,7 @@ async function startTestBridge(h: {
   profileConfig: ReturnType<typeof createDefaultProfileConfig>;
   agent: FakeAgentAdapter;
   sessions: SessionStore;
+  sessionCatalog?: SessionCatalog;
   workspaces: WorkspaceStore;
   controls: ReturnType<typeof createControls>;
 }): Promise<void> {
@@ -536,6 +635,7 @@ async function startTestBridge(h: {
     cfg: h.profileConfig,
     agent: h.agent,
     sessions: h.sessions,
+    sessionCatalog: h.sessionCatalog,
     workspaces: h.workspaces,
     controls: h.controls,
   });
@@ -543,9 +643,10 @@ async function startTestBridge(h: {
 }
 
 function createFakeLarkChannel(options: {
-  chatMode?: 'group' | 'topic';
+  chatMode?: 'p2p' | 'group' | 'topic';
   quotedMessages?: Record<string, string>;
   rawThreadIds?: Record<string, string>;
+  rawRootIds?: Record<string, string>;
   threadMessages?: Array<Record<string, unknown>>;
 } = {}):FakeLarkChannel & { handlers: MessageHandlerMap } {
   const handlers: MessageHandlerMap = {};
@@ -556,6 +657,7 @@ function createFakeLarkChannel(options: {
     om_topic_root: 'topic root content',
   };
   const rawThreadIds = options.rawThreadIds ?? {};
+  const rawRootIds = options.rawRootIds ?? {};
   const threadMessages = options.threadMessages ?? [];
   return {
     handlers,
@@ -590,6 +692,7 @@ function createFakeLarkChannel(options: {
         create_time: '1760000000000',
         sender: { id: 'ou_quote_sender' },
         ...(rawThreadIds[messageId] ? { thread_id: rawThreadIds[messageId] } : {}),
+        ...(rawRootIds[messageId] ? { root_id: rawRootIds[messageId] } : {}),
       },
     ]),
     on(nextHandlers) {
@@ -634,8 +737,8 @@ function createControls(profileConfig: ReturnType<typeof createDefaultProfileCon
 
 function message(input: {
   messageId: string;
-  rootId: string;
-  parentId: string;
+  rootId?: string;
+  parentId?: string;
   threadId?: string;
   content: string;
   rawContentType?: string;

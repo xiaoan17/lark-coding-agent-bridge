@@ -2,7 +2,7 @@ import type { LarkChannel } from '@larksuite/channel';
 import { log } from '../core/logger';
 
 /**
- * Recover a message's topic `thread_id` (omt_*) via the raw `im.v1.message.get`
+ * Recover a message's topic IDs via the raw `im.v1.message.get`
  * API.
  *
  * Feishu delivers a sizable fraction of topic-group message events (and every
@@ -16,17 +16,26 @@ import { log } from '../core/logger';
  * NormalizedMessage path rebuilds a synthetic raw event without `thread_id`, so
  * threadId always comes back undefined.
  *
- * Returns `undefined` on any error or when the message genuinely has no thread
- * (callers fall back to chat-level routing).
+ * Returns `undefined` when the lookup fails. A message outside a topic can
+ * still return an object with no IDs.
  */
-export async function lookupMessageThreadId(
+export async function lookupMessageTopic(
   channel: LarkChannel,
   messageId: string,
-): Promise<string | undefined> {
+): Promise<{ threadId?: string; rootId?: string; replyToMessageId?: string } | undefined> {
   try {
-    const [parent] = await channel.fetchRawMessage(messageId);
-    // ApiMessageItem's SDK type omits thread_id even though the API returns it.
-    return (parent as { thread_id?: string } | undefined)?.thread_id;
+    // ApiMessageItem's SDK type omits these fields even though the API returns them.
+    const [message] = await channel.fetchRawMessage(messageId) as Array<{
+      thread_id?: string;
+      root_id?: string;
+      parent_id?: string;
+    }>;
+    if (!message) return undefined;
+    return {
+      threadId: message.thread_id || undefined,
+      rootId: message.root_id || undefined,
+      replyToMessageId: message.parent_id || undefined,
+    };
   } catch (err) {
     log.warn('thread', 'thread-id-lookup-failed', {
       messageId,

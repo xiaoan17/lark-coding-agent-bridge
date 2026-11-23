@@ -31,8 +31,9 @@ export class WorkspaceStore {
     }
   }
 
-  cwdFor(chatId: string): string | undefined {
-    return this.data.chats[chatId]?.cwd;
+  cwdFor(scope: string, fallbackScope?: string): string | undefined {
+    return this.data.chats[scope]?.cwd
+      ?? (fallbackScope ? this.data.chats[fallbackScope]?.cwd : undefined);
   }
 
   setCwd(chatId: string, cwd: string): void {

@@ -1,7 +1,7 @@
-import type { CardActionEvent, LarkChannel, NormalizedMessage } from '@larksuite/channel';
+import type { CardActionEvent, LarkChannel } from '@larksuite/channel';
 import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
-import type { ChatModeCache } from '../bot/chat-mode-cache';
+import type { ChatMode, ChatModeCache } from '../bot/chat-mode-cache';
 import type { PendingQueue } from '../bot/pending-queue';
 import type { ProcessPool } from '../bot/process-pool';
 import type { CallbackAuth } from './callback-auth';
@@ -13,7 +13,8 @@ import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { commandSessionCatalogIdentity } from '../bot/session-catalog-identity';
-import { lookupMessageThreadId } from '../bot/thread-id';
+import { imRoute, type RoutedMessage } from '../bot/scope';
+import { lookupMessageTopic } from '../bot/thread-id';
 
 /** Marker key on a button's value object that flags the cardAction as
  * a callback that should be forwarded back to the agent instead
@@ -58,13 +59,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     | undefined;
   const formValue = raw?.action?.form_value;
 
-  // Resolve the click's session scope. For topic groups we need to know
-  // the message's thread_id so the action targets the right topic's
-  // session — look up the carrier message (the card lives on it) once.
-  // Done before the access check so we know the chat mode (p2p vs group)
-  // and can skip the chat allowlist for DMs.
-  const { scope, threadId, mode } = await resolveScope(deps);
-
+  const mode = await deps.chatModeCache.resolve(deps.channel, chatId);
   const accessDecision =
     mode === 'p2p'
       ? canUseDm(deps.controls.profileConfig, deps.controls, operatorId)
@@ -77,6 +72,10 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     return;
   }
 
+  const route = await resolveScope(deps, mode);
+  if (!route) return;
+  const { scope, msg } = route;
+
   if (LEGACY_CLAUDE_CALLBACK_MARKER in payload) {
     log.info('cardAction', 'skip-legacy-callback-marker', { scope });
     return;
@@ -88,19 +87,16 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
       return;
     }
     log.info('cardAction', 'cmd', { cmd, scope });
-    const msg = makeFakeMsg(deps.evt, threadId);
-
     const ctx: CommandContext = {
       channel: deps.channel,
       msg,
       scope,
-      chatMode: mode,
+      chatMode: route.mode,
       sessions: deps.sessions,
       sessionCatalog: deps.sessionCatalog,
       sessionCatalogIdentity: await commandSessionCatalogIdentity({
         msg,
         scope,
-        mode,
         workspaces: deps.workspaces,
         controls: deps.controls,
         access: accessDecision,
@@ -134,7 +130,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   // as a follow-up message, with full context of what it sent.
   if (BRIDGE_CALLBACK_MARKER in payload) {
     if (!verifyBridgeToken(deps, payload, scope, 'agent_callback')) return;
-    forwardToAgent(deps, payload, formValue, scope, threadId, mode);
+    forwardToAgent(deps, payload, formValue, scope, msg);
     return;
   }
 
@@ -143,21 +139,21 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
 
 async function resolveScope(
   deps: CardDispatchDeps,
-): Promise<{ scope: string; threadId: string | undefined; mode: 'p2p' | 'group' | 'topic' }> {
-  const chatId = deps.evt.chatId;
-  const mode = await deps.chatModeCache.resolve(deps.channel, chatId);
-  if (mode !== 'topic') {
-    return { scope: chatId, threadId: undefined, mode };
+  mode: ChatMode,
+): Promise<{ scope: string; mode: ChatMode; msg: RoutedMessage } | undefined> {
+  const autoTopics = deps.controls.profileConfig.preferences.autoTopicReplies === true;
+  const topic = mode === 'topic' || autoTopics
+    ? await lookupMessageTopic(deps.channel, deps.evt.messageId)
+    : undefined;
+  if (autoTopics && (!topic || (mode === 'topic' && !topic.threadId))) {
+    log.warn('cardAction', 'topic-route-unresolved', { chatId: deps.evt.chatId, msgId: deps.evt.messageId });
+    return undefined;
   }
-  // Topic group — need the carrier message's thread_id to compose scope.
-  // One API call per click; could cache by messageId if it ever becomes hot.
-  const threadId = await lookupMessageThreadId(deps.channel, deps.evt.messageId);
-  if (!threadId) {
-    // Fall back to plain chatId. Better to land in the chat's "default"
-    // scope than fail the click silently.
-    return { scope: chatId, threadId: undefined, mode };
-  }
-  return { scope: `${chatId}:${threadId}`, threadId, mode };
+  const msg = { ...makeFakeMsg(deps.evt, mode), ...topic };
+  // A top-level command card stays chat-scoped. Only cards replying to a
+  // message can carry an auto-topic root.
+  const route = imRoute(msg, mode, autoTopics && Boolean(topic?.rootId || topic?.replyToMessageId));
+  return { ...route, msg: { ...msg, chatMode: route.mode, topicRootId: route.topicRootId } };
 }
 
 function forwardToAgent(
@@ -165,8 +161,7 @@ function forwardToAgent(
   payload: Record<string, unknown>,
   formValue: Record<string, unknown> | undefined,
   scope: string,
-  threadId: string | undefined,
-  mode: 'p2p' | 'group' | 'topic',
+  msg: RoutedMessage,
 ): void {
   // Strip the marker so the agent only sees the meaningful fields it set.
   const {
@@ -179,20 +174,10 @@ function forwardToAgent(
     scope,
     payload: JSON.stringify(merged).slice(0, 200),
   });
-  const synthetic: NormalizedMessage = {
-    messageId: deps.evt.messageId,
-    chatId: deps.evt.chatId,
-    chatType: mode === 'p2p' ? 'p2p' : 'group',
-    threadId,
-    senderId: deps.evt.operator.openId,
-    senderName: deps.evt.operator.name,
+  const synthetic: RoutedMessage = {
+    ...msg,
     content: `[card-click] ${JSON.stringify(merged)}`,
     rawContentType: 'card_action',
-    resources: [],
-    mentions: [],
-    mentionAll: false,
-    mentionedBot: false,
-    createTime: Date.now(),
   };
   deps.pending.push(scope, synthetic);
 }
@@ -251,13 +236,13 @@ function composeArgs(sub: string, payload: Record<string, unknown>): string {
 
 function makeFakeMsg(
   evt: CardActionEvent,
-  threadId: string | undefined,
-): NormalizedMessage {
+  mode: ChatMode,
+): RoutedMessage {
   return {
     messageId: evt.messageId,
     chatId: evt.chatId,
-    chatType: 'p2p',
-    threadId,
+    chatType: mode === 'p2p' ? 'p2p' : 'group',
+    threadId: undefined,
     senderId: evt.operator.openId,
     senderName: evt.operator.name,
     content: '',

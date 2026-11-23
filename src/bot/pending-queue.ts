@@ -1,16 +1,16 @@
-import type { NormalizedMessage } from '@larksuite/channel';
 import { log } from '../core/logger';
+import type { RoutedMessage } from './scope';
 
 interface PendingEntry {
-  messages: NormalizedMessage[];
+  messages: RoutedMessage[];
   timer?: NodeJS.Timeout;
 }
 
-export type FlushHandler = (scope: string, batch: NormalizedMessage[]) => void;
+export type FlushHandler = (scope: string, batch: RoutedMessage[]) => void;
 
 /**
  * Per-scope debounce queue. `scope` is the session scope string (typically
- * `chatId` for p2p / regular group, `chatId:threadId` for topic groups).
+ * `chatId`, `chatId:threadId` for native topics, or `chatId:rootId` for auto-created topics).
  * Accumulates messages within the same scope inside a quiet window, then
  * flushes as a single batch.
  *
@@ -31,7 +31,7 @@ export class PendingQueue {
     this.onFlush = onFlush;
   }
 
-  push(scope: string, msg: NormalizedMessage): number {
+  push(scope: string, msg: RoutedMessage): number {
     const existing = this.map.get(scope);
     if (existing) {
       if (existing.timer) clearTimeout(existing.timer);
@@ -46,7 +46,7 @@ export class PendingQueue {
     return 1;
   }
 
-  cancel(scope: string): NormalizedMessage[] {
+  cancel(scope: string): RoutedMessage[] {
     const entry = this.map.get(scope);
     if (!entry) return [];
     if (entry.timer) clearTimeout(entry.timer);

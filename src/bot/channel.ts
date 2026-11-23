@@ -64,7 +64,8 @@ import { startKeepalive } from './keepalive';
 import { PendingQueue } from './pending-queue';
 import { ProcessPool } from './process-pool';
 import { fetchQuotedContext, fetchTopicContext, type QuotedContext } from './quote';
-import { lookupMessageThreadId } from './thread-id';
+import { imRoute, type RoutedMessage } from './scope';
+import { lookupMessageTopic } from './thread-id';
 import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
@@ -272,10 +273,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   const channel = createLarkChannel(opts);
   const media = new MediaCache(channel, deps.appPaths?.mediaDir);
 
-  // Pending → run handoff: while a run is active on a chat, block its pending
+  // Pending → run handoff: while a run is active on a scope, block its pending
   // queue so messages keep accumulating without flushing. When the run ends,
   // unblock arms a fresh quiet-window timer. Net effect: at most one run per
-  // chat in flight, and everything sent during a run merges into the next
+  // scope in flight, and everything sent during a run merges into the next
   // batch (only flushed once 600ms of silence has passed *after* the run).
   const pending = new PendingQueue(DEBOUNCE_MS, (scope, batch) => {
     const firstMsg = batch[0];
@@ -290,20 +291,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         msgId: firstMsg.messageId,
       });
       try {
-        const resolvedMode = await chatModeCache.resolve(channel, firstMsg.chatId);
-        // Feishu/Lark converted topic groups may still resolve as `group` from
-        // the chat info API/cache, while message events already carry threadId.
-        // Treat threadId as authoritative for IM messages so scope and replies
-        // stay isolated per topic.
-        const mode = firstMsg.threadId ? 'topic' : resolvedMode;
-        if (firstMsg.threadId && resolvedMode !== 'topic') {
-          chatModeCache.invalidate(firstMsg.chatId);
-          logThreadModeOverride({
-            chatId: firstMsg.chatId,
-            resolvedMode,
-            threadId: firstMsg.threadId,
-          });
-        }
+        const mode = firstMsg.chatMode ?? await chatModeCache.resolve(channel, firstMsg.chatId);
         await runAgentBatch({
           channel,
           executor,
@@ -600,13 +588,18 @@ async function sendForwardFetchFailedHint(
   channel: LarkChannel,
   chatId: string,
   replyToMessageId: string,
+  replyInThread = false,
 ): Promise<void> {
   const text =
     '这条合并转发的内容没能从飞书拉取到（上游超时/网络抖动，已自动重试仍失败），' +
     '所以我没收到里面的消息。麻烦稍后重新转发一次。';
   try {
-    await channel.send(chatId, { text }, { replyTo: replyToMessageId });
-  } catch {
+    await channel.send(chatId, { text }, {
+      replyTo: replyToMessageId,
+      ...(replyInThread ? { replyInThread } : {}),
+    });
+  } catch (err) {
+    if (replyInThread) throw err;
     await channel.send(chatId, { text });
   }
 }
@@ -652,34 +645,29 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const preview = msg.content.length > 80 ? `${msg.content.slice(0, 80)}…` : msg.content;
   // Resolve scope (and underlying chat mode) once at intake — every
   // downstream consumer keys off these.
-  const resolvedMode = await chatModeCache.resolve(channel, msg.chatId);
-  // Feishu delivers a sizable fraction of topic-group message events without a
-  // `thread_id` (notably the message that opens a new topic). We route topic
-  // replies (`replyInThread`) and isolate per-topic session scope off it, so a
-  // missing one makes the reply escape into a brand-new topic AND collapses the
-  // scope to the chat level. When getChatMode says this is a topic group but
-  // the event dropped `thread_id`, backfill it from the raw message — the same
-  // recovery the card-click path uses.
-  let threadId = msg.threadId;
-  if (!threadId && resolvedMode === 'topic') {
-    threadId = await lookupMessageThreadId(channel, msg.messageId);
-    if (threadId) {
-      log.info('intake', 'thread-id-backfilled', {
-        chatId: msg.chatId,
-        msgId: msg.messageId,
-        threadId,
-      });
-    }
-  }
-  // Carry the (possibly backfilled) threadId on the message so the batched
-  // flush — which reads `firstMsg.threadId` for reply routing and topic scope —
-  // sees it.
-  const emsg: NormalizedMessage = threadId === msg.threadId ? msg : { ...msg, threadId };
-  // Some groups are converted into topic groups after creation. In that state
-  // getChatMode can lag behind the message event shape, so threadId is the
-  // stronger signal for topic-scoped sessions and reply routing.
-  const chatMode = threadId ? 'topic' : resolvedMode;
-  if (threadId && resolvedMode !== 'topic') {
+  const resolvedMode = msg.chatType === 'p2p'
+    ? 'p2p'
+    : await chatModeCache.resolve(channel, msg.chatId);
+  const autoTopicReplies = controls.profileConfig.preferences.autoTopicReplies === true;
+  // Native topic starters can omit their thread ID. Follow-ups in ordinary
+  // chats need the original root to resume the same session as the first turn.
+  const lookupTopic = resolvedMode === 'topic'
+    ? !msg.threadId
+    : autoTopicReplies && Boolean(msg.threadId && !msg.rootId && !msg.replyToMessageId);
+  const topic = lookupTopic ? await lookupMessageTopic(channel, msg.messageId) : undefined;
+  const threadId = msg.threadId || topic?.threadId;
+  const parentId = msg.replyToMessageId || topic?.replyToMessageId;
+  const routed = {
+    ...msg,
+    threadId,
+    // A confirmed topic root carries a thread ID but has no parent.
+    rootId: msg.rootId || topic?.rootId
+      || (resolvedMode !== 'topic' && topic && !parentId ? msg.messageId : undefined),
+    replyToMessageId: parentId,
+  };
+  const { scope, mode: chatMode, topicRootId } = imRoute(routed, resolvedMode, autoTopicReplies);
+  const emsg: RoutedMessage = { ...routed, chatMode, topicRootId };
+  if (threadId && resolvedMode === 'group' && !topicRootId) {
     chatModeCache.invalidate(msg.chatId);
     logThreadModeOverride({
       chatId: msg.chatId,
@@ -687,9 +675,6 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       threadId,
     });
   }
-  const scope = chatMode === 'topic' && threadId
-    ? `${msg.chatId}:${threadId}`
-    : msg.chatId;
   log.info('intake', 'enter', {
     scope,
     chatType: msg.chatType,
@@ -738,6 +723,15 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
+  if (autoTopicReplies && lookupTopic && (resolvedMode === 'topic' ? !threadId : !topicRootId)) {
+    log.warn('intake', 'topic-route-unresolved', { chatId: msg.chatId, msgId: msg.messageId });
+    await channel.send(msg.chatId, { text: '暂时无法确认这条消息所属的话题，请稍后在原话题里重发。' }, {
+      replyTo: msg.messageId,
+      replyInThread: true,
+    });
+    return;
+  }
+
   // A merge_forward whose sub-messages the SDK could not fetch (transient
   // upstream failure, already retried inside @larksuite/channel) arrives as the
   // fetch_failed sentinel. Feeding it to the agent would read as an empty
@@ -749,26 +743,33 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       msgId: emsg.messageId,
       chatType: emsg.chatType,
     });
-    await sendForwardFetchFailedHint(channel, emsg.chatId, emsg.messageId).catch((err) =>
+    await sendForwardFetchFailedHint(
+      channel, emsg.chatId, topicRootId ?? emsg.messageId, Boolean(topicRootId || threadId),
+    ).catch((err) =>
       log.warn('intake', 'forward-fetch-failed-hint-failed', { err: String(err) }),
     );
     return;
   }
 
+  // Top-level slash commands remain available at the chat level. Inside a
+  // topic, session and run controls only affect that topic.
+  const topLevel = topicRootId === msg.messageId;
+  const commandScope = topLevel ? msg.chatId : scope;
+  const commandMode = topLevel ? resolvedMode : chatMode;
+  const commandMsg = topLevel ? { ...emsg, topicRootId: undefined, chatMode: commandMode } : emsg;
   const handled = await tryHandleCommand({
     channel,
-    msg: emsg,
-    scope,
-    chatMode,
+    msg: commandMsg,
+    scope: commandScope,
+    chatMode: commandMode,
     sessions,
     workspaces,
     agent,
     activeRuns,
     sessionCatalog,
     sessionCatalogIdentity: await commandSessionCatalogIdentity({
-      msg: emsg,
-      scope,
-      mode: chatMode,
+      msg: commandMsg,
+      scope: commandScope,
       workspaces,
       controls,
       access: accessDecision,
@@ -778,8 +779,8 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     controls,
   });
   if (handled) {
-    const dropped = pending.cancel(scope);
-    log.info('intake', 'command', { scope, droppedPending: dropped.length });
+    const dropped = pending.cancel(commandScope);
+    log.info('intake', 'command', { scope: commandScope, droppedPending: dropped.length });
     return;
   }
 
@@ -794,7 +795,7 @@ interface RunBatchDeps {
   sessionCatalog?: SessionCatalog;
   workspaces: WorkspaceStore;
   media: MediaCache;
-  batch: NormalizedMessage[];
+  batch: RoutedMessage[];
   controls: Controls;
   cotClient: CotClient;
   callbackAuth?: CallbackAuth;
@@ -828,6 +829,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
   const chatId = firstMsg.chatId;
   const threadId = firstMsg.threadId;
+  const topicRootId = firstMsg.topicRootId;
 
   const resourceItems = batch.flatMap((m) =>
     m.resources.map((r) => ({ messageId: m.messageId, resource: r })),
@@ -878,7 +880,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // the user is pointing at. An already-engaged topic keeps that history in its
   // resumed session, so we skip the fetch there.
   let topicContext: QuotedContext[] = [];
-  if (mode === 'topic' && threadId && !sessions.getRaw(scope)) {
+  if (mode === 'topic' && threadId && !topicRootId && !sessions.getRaw(scope)) {
     const exclude = new Set([...batchIds, ...quoteTargets]);
     topicContext = await fetchTopicContext(channel, threadId, {
       maxMessages: 40,
@@ -929,12 +931,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     ...(modelSwitched ? { modelSwitchedTo: modelSelection } : {}),
   });
 
-  // For topic groups: thread the reply so it lands in the same topic as the
-  // user's message. Otherwise the SDK posts at top level and the user's
-  // topic discussion breaks visually.
+  // Automatic topics always target their original root. Native topics can
+  // reply directly to the latest user's message in the same topic.
   const sendOpts = {
-    replyTo: lastMsg.messageId,
-    ...(mode === 'topic' && threadId ? { replyInThread: true } : {}),
+    replyTo: topicRootId ?? lastMsg.messageId,
+    ...(topicRootId || (mode === 'topic' && threadId) ? { replyInThread: true } : {}),
   };
   log.info('flush', 'reply-target', {
     scope,
@@ -953,7 +954,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     source: 'im',
     chatId,
     actorId: firstMsg.senderId,
-    ...(threadId ? { threadId } : {}),
+    threadId: topicRootId ?? threadId,
   };
   const capability =
     controls.profileConfig.agentKind === 'codex'
@@ -962,6 +963,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const flow = await startRunFlow({
     scopeId: scope,
     scope: scopeContext,
+    fallbackWorkspaceScope: topicRootId ? chatId : undefined,
     prompt,
     attachments: attachments.map(toPolicyAttachment),
     access: accessDecision,
@@ -1043,7 +1045,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const replyMode = getMessageReplyMode(controls.cfg);
   log.info('flush', 'reply-mode', { mode: replyMode });
   const cotMessages = getCotMessages(controls.cfg);
-  const cotEnabled = cotMessages !== 'off';
+  // The process-bubble API cannot open an auto-topic. Use the normal
+  // card/markdown pipeline so progress and the final reply share one target.
+  const cotEnabled = cotMessages !== 'off' && !topicRootId;
 
   // Re-read prefs on every flush so toggling /config mid-stream takes
   // effect immediately. Cheap object lookups, no allocation when on.
@@ -1897,7 +1901,7 @@ function mergeMentions(batch: NormalizedMessage[]): BridgePromptMention[] {
 }
 
 function replyQuoteTargetForMessage(
-  msg: NormalizedMessage,
+  msg: RoutedMessage,
   mode: ChatMode,
 ): string | undefined {
   const replyTo = msg.replyToMessageId;
@@ -1905,7 +1909,7 @@ function replyQuoteTargetForMessage(
 
   // Feishu topic messages use root_id/parent_id as the topic root anchor even
   // for ordinary in-topic messages. Treat that as structure, not a quote.
-  if (mode === 'topic' && msg.threadId && msg.rootId && replyTo === msg.rootId) {
+  if (replyTo === msg.topicRootId || (mode === 'topic' && msg.threadId && replyTo === msg.rootId)) {
     return undefined;
   }
   return replyTo;

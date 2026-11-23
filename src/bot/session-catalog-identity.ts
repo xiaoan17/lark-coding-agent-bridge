@@ -1,4 +1,3 @@
-import type { NormalizedMessage } from '@larksuite/channel';
 import { claudeCapability, codexCapability } from '../agent/capability';
 import type { Controls } from '../commands';
 import type { AccessDecision } from '../policy/access';
@@ -6,18 +5,18 @@ import { evaluateRunPolicy } from '../policy/run-policy';
 import { resolveWorkingDirectory } from '../policy/workspace';
 import type { SessionCatalogIdentity } from '../session/catalog';
 import type { WorkspaceStore } from '../workspace/store';
-import type { ChatMode } from './chat-mode-cache';
+import type { RoutedMessage } from './scope';
 
 export async function commandSessionCatalogIdentity(input: {
-  msg: NormalizedMessage;
+  msg: RoutedMessage;
   scope: string;
-  mode: ChatMode;
   workspaces: WorkspaceStore;
   controls: Controls;
   access: AccessDecision;
 }): Promise<SessionCatalogIdentity | undefined> {
   const requestedCwd =
-    input.workspaces.cwdFor(input.scope) ?? input.controls.profileConfig.workspaces.default;
+    input.workspaces.cwdFor(input.scope, input.msg.topicRootId ? input.msg.chatId : undefined)
+      ?? input.controls.profileConfig.workspaces.default;
   if (!requestedCwd) return undefined;
   const workspace = await resolveWorkingDirectory(requestedCwd);
   if (!workspace.ok) return undefined;
@@ -30,7 +29,7 @@ export async function commandSessionCatalogIdentity(input: {
       source: 'im',
       chatId: input.msg.chatId,
       actorId: input.msg.senderId,
-      ...(input.mode === 'topic' && input.msg.threadId ? { threadId: input.msg.threadId } : {}),
+      threadId: input.msg.topicRootId ?? input.msg.threadId,
     },
     attachments: [],
     prompt: '',

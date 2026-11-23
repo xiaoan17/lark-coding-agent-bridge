@@ -299,6 +299,17 @@ grep '"event":"enter"' ~/.lark-channel/profiles/<profile>/logs/bridge-$(date +%Y
 
 Each line carries `chatId` (group / DM id) and `senderId` (user `open_id`). After a manual edit, **restart the bridge** or send `/reconnect` from an allowed admin context to apply it. For day-to-day tweaks `/invite` / `/config` are easier; direct edits are mainly for deployment scripts that pre-seed access.
 
+## Automatic topic replies
+
+Set `"autoTopicReplies": true` in the profile's `preferences` in
+`~/.lark-channel/config.json`, then restart that profile. The option defaults to off.
+
+Each new direct message or eligible ordinary-group message starts a topic with
+its own agent session and queue. Follow-ups and stop controls target the same
+topic. Group access and mention settings still apply. A chat-level `/cd` sets
+the default directory for new topics. Automatic topics use regular in-topic
+progress and replies instead of separate CoT process messages.
+
 ## Cloud-doc comments
 
 Cloud-doc comments do not need a separate workspace binding or document allowlist. In supported document comments, mention the bot and the bridge replies in the same thread. Comment runs reuse the document session key and fall back to the user home directory when no document cwd was previously recorded.
