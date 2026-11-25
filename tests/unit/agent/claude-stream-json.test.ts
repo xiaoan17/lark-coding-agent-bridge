@@ -68,19 +68,28 @@ describe('Claude stream-json translator', () => {
     ]);
   });
 
-  it('translates result usage before done', () => {
+  it('translates usage and final answer before done', () => {
     expect([
       ...translateEvent({
         type: 'result',
+        subtype: 'success',
+        result: 'final reply',
         session_id: 'sess-2',
         usage: { input_tokens: 12, output_tokens: 34, cache_read_input_tokens: 5 },
         total_cost_usd: 0.1234,
       }),
     ]).toEqual([
       { type: 'usage', inputTokens: 12, outputTokens: 34, cachedInputTokens: 5, costUsd: 0.1234 },
+      { type: 'final_text', content: 'final reply' },
       { type: 'done', sessionId: 'sess-2', terminationReason: 'normal' },
     ]);
     expect([...translateEvent({ type: 'result', session_id: 'sess-2' })][0]).not.toHaveProperty('threadId');
+  });
+
+  it('treats a failed result as a terminal error', () => {
+    expect([...translateEvent({
+      type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['request failed'],
+    })]).toEqual([{ type: 'error', message: 'request failed', terminationReason: 'failed' }]);
   });
 
   it('ignores unknown, empty, and incomplete raw events', () => {

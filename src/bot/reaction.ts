@@ -2,7 +2,7 @@ import type { LarkChannel } from '@larksuite/channel';
 import { log } from '../core/logger';
 
 /**
- * Add a "Typing" reaction (敲键盘) to a message to give text-mode users an
+ * Add a "Typing" reaction (敲键盘) to a message to give markdown-mode users an
  * instant "I got your message and I'm responding" cue while Claude is still
  * thinking. Matches the conventional Feishu UX for "the other side is
  * replying". Card mode doesn't need this — the streaming card already

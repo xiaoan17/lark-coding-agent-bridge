@@ -230,6 +230,34 @@ describe('markdown stream startup failures', () => {
     expect(lastMarkdown(h.channel)).toContain('FINAL_ONLY_SENTINEL');
   });
 
+  it.each(['codex', 'claude'] as const)('posts only the final text in text mode for %s', async (agentKind) => {
+    const stream = vi.fn(async () => {});
+    const h = await createHarness({
+      agentKind,
+      messageReply: 'text',
+      events: [
+        [
+          { type: 'text', delta: 'progress update' },
+          { type: 'thinking', delta: 'checking' },
+          { type: 'tool_use', id: 'command', name: 'Bash', input: { command: 'pwd' } },
+          { type: 'tool_result', id: 'command', output: '/repo', isError: false },
+          { type: 'final_text', content: 'The final reply.' },
+          { type: 'done', terminationReason: 'normal' },
+        ],
+      ],
+      stream,
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_text', 'run'));
+    await waitFor(() => h.channel.sent.length === 1);
+
+    expect(h.channel.sent).toHaveLength(1);
+    expect(h.channel.sent[0]?.content).toEqual({ markdown: 'The final reply.' });
+    expect(h.channel.rawClient.im.v1.messageReaction.create).not.toHaveBeenCalled();
+    expect(stream).not.toHaveBeenCalled();
+  });
+
   it('does not repeat streamed text as the final reply when Codex held nothing back', async () => {
     // Codex only reserves its *last* message as `final_text`; an abnormal turn
     // end (turn.failed, or the process dying before turn.completed) flushes it
@@ -464,7 +492,7 @@ async function createHarness(options: {
     codex: {
       binaryPath: '/usr/local/bin/codex',
     },
-    ...(options.messageReply ? { preferences: { messageReply: options.messageReply } } : {}),
+    ...(options.messageReply ? { preferences: { messageReply: options.messageReply, messageReplyMigrated: true } } : {}),
   });
   const profileConfig = {
     ...baseProfileConfig,

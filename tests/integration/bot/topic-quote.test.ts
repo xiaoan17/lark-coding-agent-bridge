@@ -495,6 +495,27 @@ describe('automatic topics', () => {
     expect(h.channel.sent[0]?.options).toMatchObject({ replyTo: 'om_retry', replyInThread: true });
   });
 
+  it('opens the automatic topic with the final reply in text mode', async () => {
+    const h = await createHarness({
+      chatMode: 'group',
+      agentKind: 'codex',
+      autoTopicReplies: true,
+      textReply: true,
+      agentEvents: [
+        { type: 'text', delta: 'progress update' },
+        { type: 'final_text', content: 'final answer' },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    });
+    await startTestBridge(h);
+    await h.channel.handlers.message?.(message({ messageId: 'om_text', content: 'task' }));
+    await waitFor(() => h.channel.sent.length === 1);
+
+    expect(h.channel.streams).toHaveLength(0);
+    expect(h.channel.sent[0]?.content).toEqual({ markdown: 'final answer' });
+    expect(h.channel.sent[0]?.options).toMatchObject({ replyTo: 'om_text', replyInThread: true });
+  });
+
   it('does not put an unresolved topic into the shared group session', async () => {
     const h = await createHarness({ autoTopicReplies: true });
     h.channel.fetchRawMessage.mockResolvedValueOnce([]);
@@ -557,6 +578,7 @@ async function createHarness(options: {
   chatMode?: 'p2p' | 'group' | 'topic';
   agentKind?: 'claude' | 'codex';
   autoTopicReplies?: boolean;
+  textReply?: boolean;
   quotedMessages?: Record<string, string>;
   rawThreadIds?: Record<string, string>;
   rawRootIds?: Record<string, string>;
@@ -591,7 +613,11 @@ async function createHarness(options: {
   });
   const profileConfig = {
     ...baseProfileConfig,
-    preferences: { ...baseProfileConfig.preferences, autoTopicReplies: options.autoTopicReplies },
+    preferences: {
+      ...baseProfileConfig.preferences,
+      autoTopicReplies: options.autoTopicReplies,
+      ...(options.textReply ? { messageReply: 'text' as const, messageReplyMigrated: true } : {}),
+    },
     workspaces: {
       ...baseProfileConfig.workspaces,
       default: workspace,

@@ -15,6 +15,9 @@ interface ContentBlock {
 interface ClaudeRawEvent {
   type?: string;
   subtype?: string;
+  result?: unknown;
+  is_error?: boolean;
+  errors?: unknown;
   session_id?: string;
   cwd?: string;
   model?: string;
@@ -79,6 +82,21 @@ export function* translateEvent(raw: unknown): Generator<AgentEvent> {
         cachedInputTokens: evt.usage.cache_read_input_tokens,
         costUsd: evt.total_cost_usd,
       };
+    }
+    const subtype = typeof evt.subtype === 'string' ? evt.subtype : '';
+    if (evt.is_error === true || subtype.startsWith('error_')) {
+      const errors = Array.isArray(evt.errors)
+        ? evt.errors.filter((error): error is string => typeof error === 'string').join('\n')
+        : '';
+      yield {
+        type: 'error',
+        message: errors || (typeof evt.result === 'string' ? evt.result.trim() : '') || 'Claude Code run failed',
+        terminationReason: 'failed',
+      };
+      return;
+    }
+    if (subtype === 'success' && typeof evt.result === 'string' && evt.result.trim()) {
+      yield { type: 'final_text', content: evt.result };
     }
     yield { type: 'done', sessionId: evt.session_id, terminationReason: 'normal' };
   }
