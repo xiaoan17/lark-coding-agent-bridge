@@ -1070,10 +1070,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       }
     : {};
 
-  // A markdown stream can take time to open. Show a typing reaction while
-  // waiting, without blocking the event drain. Text mode posts only at the end.
+  // Give markdown and text replies a working indicator on the input message
+  // without blocking the event drain or sending an extra message.
   const reactionPromise =
-    !cotEnabled && replyMode === 'markdown' ? addWorkingReaction(channel, lastMsg.messageId) : undefined;
+    !cotEnabled && replyMode !== 'card' ? addWorkingReaction(channel, lastMsg.messageId) : undefined;
 
   try {
     if (cotEnabled) {

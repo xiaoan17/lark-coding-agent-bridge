@@ -101,9 +101,10 @@ describe('markdown stream startup failures', () => {
     expect(lastMarkdown(h.channel)).toContain('codex exited with code 1');
   });
 
-  it('does not wait for the working reaction before draining a failed agent run', async () => {
+  it.each(['markdown', 'text'] as const)('does not wait for a pending reaction to report a failure in %s mode', async (messageReply) => {
     const reaction = deferred<{ data: { reaction_id: string } }>();
     const h = await createHarness({
+      messageReply,
       reactionCreate: () => reaction.promise,
     });
     await startTestBridge(h);
@@ -230,8 +231,9 @@ describe('markdown stream startup failures', () => {
     expect(lastMarkdown(h.channel)).toContain('FINAL_ONLY_SENTINEL');
   });
 
-  it.each(['codex', 'claude'] as const)('posts only the final text in text mode for %s', async (agentKind) => {
+  it.each(['codex', 'claude'] as const)('shows a working reaction and posts only the final text for %s', async (agentKind) => {
     const stream = vi.fn(async () => {});
+    const sendReceipt = deferred<{ messageId: string }>();
     const h = await createHarness({
       agentKind,
       messageReply: 'text',
@@ -246,6 +248,7 @@ describe('markdown stream startup failures', () => {
         ],
       ],
       stream,
+      send: () => sendReceipt.promise,
     });
     await startTestBridge(h);
 
@@ -254,8 +257,20 @@ describe('markdown stream startup failures', () => {
 
     expect(h.channel.sent).toHaveLength(1);
     expect(h.channel.sent[0]?.content).toEqual({ markdown: 'The final reply.' });
-    expect(h.channel.rawClient.im.v1.messageReaction.create).not.toHaveBeenCalled();
+    const reactions = h.channel.rawClient.im.v1.messageReaction;
+    expect(reactions.create).toHaveBeenCalledTimes(1);
+    expect(reactions.create).toHaveBeenCalledWith({
+      path: { message_id: 'om_text' },
+      data: { reaction_type: { emoji_type: 'Typing' } },
+    });
+    expect(reactions.delete).not.toHaveBeenCalled();
     expect(stream).not.toHaveBeenCalled();
+
+    sendReceipt.resolve({ messageId: 'sent_text' });
+    await waitFor(() => reactions.delete.mock.calls.length === 1);
+    expect(reactions.delete).toHaveBeenCalledWith({
+      path: { message_id: 'om_text', reaction_id: 'reaction_1' },
+    });
   });
 
   it('does not repeat streamed text as the final reply when Codex held nothing back', async () => {
