@@ -175,6 +175,12 @@ describe('ui server (supervisor-backed)', () => {
     expect(set.chatRequireMention).toEqual({ oc_grp: false });
     expect(online.get('claude').profileConfig.access.chatRequireMention).toEqual({ oc_grp: false });
 
+    const ownerOnly = await json(
+      await post('/api/access', handle.token, { action: 'set-mention', kind: 'chat', id: 'oc_grp', requireMention: 'owner-exempt' }),
+    );
+    expect(ownerOnly.chatRequireMention).toEqual({ oc_grp: 'owner-exempt' });
+    expect(online.get('claude').profileConfig.access.chatRequireMention).toEqual({ oc_grp: 'owner-exempt' });
+
     // Clear it (follow global) with null.
     const cleared = await json(
       await post('/api/access', handle.token, { action: 'set-mention', kind: 'chat', id: 'oc_grp', requireMention: null }),

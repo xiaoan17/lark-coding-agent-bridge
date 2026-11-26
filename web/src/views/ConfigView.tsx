@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { apiGet, apiPost } from "@/lib/api";
 import type {
+  ChatMentionOverride,
   ConfigView as ConfigData,
   DeviceLogin,
   KnownChat,
@@ -109,8 +110,7 @@ export function ConfigView({ profile }: { profile: string }) {
     }
   }
 
-  // Set (true/false) or clear (null = follow global) a chat's @-mention override.
-  async function setMention(id: string, requireMention: boolean | null) {
+  async function setMention(id: string, requireMention: ChatMentionOverride | null) {
     try {
       const acc = await apiPost<ConfigData["access"]>(
         `/api/access?profile=${encodeURIComponent(profile)}`,
@@ -570,15 +570,21 @@ function AllowedChats({
 }: {
   profile: string;
   ids: string[];
-  chatRequireMention: Record<string, boolean>;
+  chatRequireMention: Record<string, ChatMentionOverride>;
   chatNames: Record<string, string>;
   globalRequire: boolean;
   onAdd: (id: string, name?: string) => void;
   onRemove: (id: string) => void;
-  onSetMention: (id: string, requireMention: boolean | null) => void;
+  onSetMention: (id: string, requireMention: ChatMentionOverride | null) => void;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [draft, setDraft] = useState("");
+  const mentionOptions = [
+    { value: "global", setting: null, label: `@：跟随全局（${globalRequire ? "需@" : "无需@"}）` },
+    { value: "on", setting: true, label: "需要 @" },
+    { value: "off", setting: false, label: "全员免 @" },
+    { value: "owner-exempt", setting: "owner-exempt", label: "仅应用所有者免 @" },
+  ] as const;
 
   return (
     <div className="space-y-2">
@@ -586,8 +592,8 @@ function AllowedChats({
       <div className="divide-y rounded-md border">
         {ids.length === 0 && <p className="px-3 py-2 text-xs text-muted-foreground">（暂无）</p>}
         {ids.map((id) => {
-          const override = chatRequireMention[id];
-          const value = override === undefined ? "global" : override ? "on" : "off";
+          const override = chatRequireMention[id] ?? null;
+          const value = mentionOptions.find((option) => option.setting === override)?.value ?? "global";
           return (
             <div key={id} className="flex items-center gap-2 px-3 py-2">
               <div className="min-w-0 flex-1">
@@ -596,13 +602,16 @@ function AllowedChats({
               </div>
               <Select
                 value={value}
-                onValueChange={(v) => onSetMention(id, v === "global" ? null : v === "on")}
+                onValueChange={(v) => {
+                  const option = mentionOptions.find((item) => item.value === v);
+                  if (option) onSetMention(id, option.setting);
+                }}
               >
                 <SelectTrigger className="h-8 w-[150px]"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="global">@：跟随全局（{globalRequire ? "需@" : "无需@"}）</SelectItem>
-                  <SelectItem value="on">需要 @</SelectItem>
-                  <SelectItem value="off">无需 @</SelectItem>
+                  {mentionOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
               <Button variant="ghost" size="sm" onClick={() => onRemove(id)}>移除</Button>

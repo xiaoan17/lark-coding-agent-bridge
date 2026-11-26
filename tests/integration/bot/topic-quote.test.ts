@@ -516,6 +516,38 @@ describe('automatic topics', () => {
     expect(h.channel.sent[0]?.options).toMatchObject({ replyTo: 'om_text', replyInThread: true });
   });
 
+  it('allows the app owner to skip @ and requires it from other members of the same group', async () => {
+    const h = await createHarness({
+      chatMode: 'group',
+      agentKind: 'codex',
+      autoTopicReplies: true,
+      textReply: true,
+    });
+    const answer: AgentEvent[] = [
+      { type: 'final_text', content: 'answer' },
+      { type: 'done', terminationReason: 'normal' },
+    ];
+    h.agent.setEvents([answer, answer]);
+    h.profileConfig.access.chatRequireMention = { oc_topic_chat: 'owner-exempt' };
+    await startTestBridge(h);
+
+    const send = (messageId: string, senderId: string, mentionedBot: boolean) =>
+      h.channel.handlers.message?.({
+        ...message({ messageId, content: messageId, mentionedBot, mentions: mentionedBot ? undefined : [] }),
+        senderId,
+      });
+    await send('om_member_plain', 'ou_user', false);
+    await send('om_owner_plain', 'ou_owner', false);
+    await send('om_member_mentioned', 'ou_user', true);
+    await waitFor(() => h.channel.sent.length >= 2);
+
+    expect(h.agent.runOptions).toHaveLength(2);
+    expect(h.channel.sent.map(({ options }) => options)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ replyTo: 'om_owner_plain', replyInThread: true }),
+      expect.objectContaining({ replyTo: 'om_member_mentioned', replyInThread: true }),
+    ]));
+  });
+
   it('does not put an unresolved topic into the shared group session', async () => {
     const h = await createHarness({ autoTopicReplies: true });
     h.channel.fetchRawMessage.mockResolvedValueOnce([]);

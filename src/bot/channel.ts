@@ -708,15 +708,13 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // Group-mention policy. p2p is always unrestricted; in groups (regular and
   // topic) we drop messages that don't @bot when the user has opted into the
   // quiet-by-default behavior. A per-chat override (set from /config's group
-  // picker) takes priority over the global setting, so one group can respond
-  // to everything while others stay @-only (or vice versa). Slash commands are
-  // NOT exempt — the user chose strict mode so the group stays uniformly quiet
-  // unless mentioned. @全员 is already filtered by SDK
+  // picker) takes priority over the global setting and may exempt the verified
+  // app owner. The same rule applies to slash commands. @全员 is filtered by SDK
   // (`respondToMentionAll: false`), so any event reaching here is either
   // targeted or undirected chatter.
   if (
     msg.chatType !== 'p2p' &&
-    requireMentionForChat(controls.profileConfig, controls.cfg, msg.chatId) &&
+    requireMentionForChat(controls.profileConfig, controls.cfg, msg.chatId, accessDecision.reason === 'owner') &&
     !msg.mentionedBot
   ) {
     log.info('intake', 'skip-no-mention', { scope, chatType: msg.chatType });

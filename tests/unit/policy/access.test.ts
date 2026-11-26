@@ -159,6 +159,13 @@ describe('requireMentionForChat', () => {
     // An unlisted chat still follows the global setting.
     expect(requireMentionForChat(profile, globalOn, 'oc_other')).toBe(true);
   });
+
+  it('exempts only the app owner from the @-mention requirement in that chat', () => {
+    const profile = profileWithAccess({ chatRequireMention: { oc_owner: 'owner-exempt' } });
+    expect(requireMentionForChat(profile, globalOn, 'oc_owner', true)).toBe(false);
+    expect(requireMentionForChat(profile, globalOff, 'oc_owner', false)).toBe(true);
+    expect(requireMentionForChat(profile, globalOn, 'oc_other', true)).toBe(true);
+  });
 });
 
 function profileWithAccess(

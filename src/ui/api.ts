@@ -30,7 +30,9 @@ import {
   getRequireMentionInGroup,
   getRunIdleTimeoutMs,
   getShowToolCalls,
+  isChatMentionOverride,
   type AppPreferences,
+  type ChatMentionOverride,
   type CotMessagesMode,
   type MessageReplyMode,
 } from '../config/schema';
@@ -68,9 +70,8 @@ export interface ConfigView {
     allowedUsers: string[];
     allowedChats: string[];
     admins: string[];
-    /** Per-chat @-mention override (chat_id → bool); overrides the global
-     * requireMentionInGroup. Absent chats follow the global setting. */
-    chatRequireMention: Record<string, boolean>;
+    /** Per-chat @-mention override. Absent chats follow the global setting. */
+    chatRequireMention: Record<string, ChatMentionOverride>;
   };
   /** True when edits to this profile apply live (its process hosts the UI). */
   live: boolean;
@@ -351,7 +352,7 @@ const ACCESS_LIST: Record<AccessKind, 'allowedUsers' | 'admins' | 'allowedChats'
  *  - `add`/`remove` a single id from a list (user/admin/chat) — mirrors
  *    `/invite` `/remove`. Removing a chat also drops its @-mention override.
  *  - `set-mention`: set (or clear) a chat's per-chat @-mention override. Pass
- *    `requireMention: true|false` to override, or `null` to follow the global.
+ *    `requireMention: true|false|'owner-exempt'` to override, or `null` to follow the global.
  */
 export async function mutateAccess(
   state: MutableProfileState,
@@ -364,14 +365,10 @@ export async function mutateAccess(
 
   if (action === 'set-mention') {
     if (!id) throw new ApiError(400, 'id is required');
-    if (
-      fv.requireMention !== null &&
-      typeof fv.requireMention !== 'boolean' &&
-      fv.requireMention !== undefined
-    ) {
-      throw new ApiError(400, 'requireMention must be boolean or null');
+    const requireMention = fv.requireMention ?? null;
+    if (requireMention !== null && !isChatMentionOverride(requireMention)) {
+      throw new ApiError(400, 'requireMention must be boolean, owner-exempt, or null');
     }
-    const requireMention = typeof fv.requireMention === 'boolean' ? fv.requireMention : null;
     const access = await saveAccessConfig(state, (current) => {
       const map = { ...(current.chatRequireMention ?? {}) };
       if (requireMention === null) delete map[id];

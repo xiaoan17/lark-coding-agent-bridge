@@ -3,6 +3,7 @@ export type ProfileMode = "personal" | "team";
 export type LarkCliIdentity = "bot-only" | "user-default";
 export type MessageReply = "card" | "markdown" | "text";
 export type CotMessages = "off" | "brief" | "detailed";
+export type ChatMentionOverride = boolean | "owner-exempt";
 
 export interface Status {
   hosted: boolean;
@@ -54,7 +55,7 @@ export interface ConfigView {
     allowedChats: string[];
     admins: string[];
     /** chat_id → per-chat @-mention override (overrides requireMentionInGroup). */
-    chatRequireMention: Record<string, boolean>;
+    chatRequireMention: Record<string, ChatMentionOverride>;
   };
   /** True when this profile's process hosts the UI (edits apply live). */
   live?: boolean;

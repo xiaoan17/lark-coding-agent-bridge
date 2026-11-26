@@ -66,8 +66,10 @@ export function requireMentionForChat(
   profile: ProfileConfig,
   cfg: AppConfig,
   chatId: string,
+  senderIsOwner = false,
 ): boolean {
   const override = profile.access.chatRequireMention?.[chatId];
+  if (override === 'owner-exempt') return !senderIsOwner;
   return typeof override === 'boolean' ? override : getRequireMentionInGroup(cfg);
 }
 

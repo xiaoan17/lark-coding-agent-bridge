@@ -1,8 +1,10 @@
-import type {
-  AppCredentials,
-  AppPreferences,
-  MessageReplyMode,
-  SecretsConfig,
+import {
+  isChatMentionOverride,
+  type AppCredentials,
+  type AppPreferences,
+  type ChatMentionOverride,
+  type MessageReplyMode,
+  type SecretsConfig,
 } from './schema';
 import {
   normalizePermissions,
@@ -24,11 +26,11 @@ export interface ProfileAccess {
   requireMentionInGroup: boolean;
   /**
    * Per-chat override of {@link requireMentionInGroup}, keyed by chat_id.
-   * `true` = require an @-mention in that chat, `false` = respond to every
-   * message. A chat absent from the map follows the global setting. Takes
-   * priority over `requireMentionInGroup` for the chats it lists.
+   * `true` requires an @-mention, `false` lets every authorized sender skip
+   * it, and `owner-exempt` lets only the app owner skip it. A chat absent
+   * from the map follows the global setting.
    */
-  chatRequireMention?: Record<string, boolean>;
+  chatRequireMention?: Record<string, ChatMentionOverride>;
 }
 
 export interface SandboxConfig {
@@ -353,12 +355,11 @@ function normalizeAccess(
   };
 }
 
-/** Keep only string→boolean entries; drop anything malformed. */
-function normalizeChatMentionMap(input: unknown): Record<string, boolean> {
+function normalizeChatMentionMap(input: unknown): Record<string, ChatMentionOverride> {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
-  const out: Record<string, boolean> = {};
+  const out: Record<string, ChatMentionOverride> = {};
   for (const [chatId, value] of Object.entries(input as Record<string, unknown>)) {
-    if (chatId && typeof value === 'boolean') out[chatId] = value;
+    if (chatId && isChatMentionOverride(value)) out[chatId] = value;
   }
   return out;
 }

@@ -69,6 +69,12 @@ export interface SecretsConfig {
 export type MessageReplyMode = 'card' | 'markdown' | 'text';
 export type CotMessagesMode = 'off' | 'brief' | 'detailed';
 
+export type ChatMentionOverride = boolean | 'owner-exempt';
+
+export function isChatMentionOverride(value: unknown): value is ChatMentionOverride {
+  return typeof value === 'boolean' || value === 'owner-exempt';
+}
+
 /**
  * Access control settings. Empty lists are fail-closed in the v2 policy:
  * no DM senders, no group chats, and only the runtime owner can administer
@@ -84,9 +90,8 @@ export interface AppAccess {
    * (/account, /config, /exit, /reconnect, /doctor, /cd, /ws, /doc,
    * /invite, /remove). */
   admins?: string[];
-  /** Per-chat @-mention override (chat_id → bool); overrides the global
-   * requireMentionInGroup for the listed chats. */
-  chatRequireMention?: Record<string, boolean>;
+  /** Per-chat @-mention override, taking priority over requireMentionInGroup. */
+  chatRequireMention?: Record<string, ChatMentionOverride>;
 }
 
 export interface AppPreferences {
