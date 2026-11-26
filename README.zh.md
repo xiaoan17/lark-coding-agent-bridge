@@ -285,7 +285,10 @@ bridge 会检查所选目录存在、是目录，并且不是 `/`、Home 根、�
         "allowedUsers": ["ou_xxxxxxxxxxxxx"],
         "allowedChats": ["oc_xxxxxxxxxxxxx"],
         "admins": ["ou_xxxxxxxxxxxxx"],
-        "requireMentionInGroup": true
+        "requireMentionInGroup": true,
+        "chatRequireMention": {
+          "oc_xxxxxxxxxxxxx": "owner-exempt"
+        }
       }
     }
   }
